@@ -1,110 +1,75 @@
-/*
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
 package copyserver;
 
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 
-/**
- *
- * @author vsingh
- */
-public class CopyServer {
+/** Serves readable regular files from one explicitly configured root. */
+public final class CopyServer {
+    private final Path root;
 
-    /**
-     * @param args the command line arguments
-     */
+    public CopyServer(Path root) throws IOException {
+        this.root = root.toRealPath();
+        if (!Files.isDirectory(this.root)) {
+            throw new IOException("Server root is not a directory: " + root);
+        }
+    }
+
+    Path resolveRequestedFile(String request) throws IOException {
+        if (request == null || request.trim().isEmpty()) {
+            throw new IOException("A relative file path is required");
+        }
+        Path requested = Paths.get(request.trim());
+        if (requested.isAbsolute()) {
+            throw new IOException("Absolute paths are not allowed");
+        }
+
+        Path candidate = root.resolve(requested).normalize().toRealPath();
+        if (!candidate.startsWith(root)) {
+            throw new IOException("Requested path escapes the configured server root");
+        }
+        if (!Files.isRegularFile(candidate) || !Files.isReadable(candidate)) {
+            throw new IOException("Requested path is not a readable regular file");
+        }
+        return candidate;
+    }
+
+    void serveOnce(ServerSocket listener) throws IOException {
+        try (Socket client = listener.accept();
+             BufferedReader request = new BufferedReader(new InputStreamReader(
+                     client.getInputStream(), StandardCharsets.UTF_8));
+             DataOutputStream output = new DataOutputStream(client.getOutputStream())) {
+            try {
+                Path file = resolveRequestedFile(request.readLine());
+                output.writeLong(Files.size(file));
+                Files.copy(file, output);
+            } catch (IOException error) {
+                output.writeLong(-1L);
+                output.writeUTF(error.getMessage());
+            }
+            output.flush();
+        }
+    }
+
+    public void serve(int port) throws IOException {
+        try (ServerSocket listener = new ServerSocket(port)) {
+            while (!Thread.currentThread().isInterrupted()) {
+                serveOnce(listener);
+            }
+        }
+    }
+
     public static void main(String[] args) throws IOException {
-        System.out.println("!1!");
-        if (null == args || args.length < 1) {
-            System.out.println("Usage: java CopyServer port");
-            System.out.println(args.length);
-            System.exit(1);
+        if (args == null || args.length != 2) {
+            throw new IllegalArgumentException("Usage: CopyServer <port> <server-root>");
         }
-        CopyServer service = new CopyServer();
-        service.run(Integer.parseInt(args[0]));
-
-    }
-
-    public void run(int port) throws IOException {
-
-        // TODO code application logic here
-        BufferedReader bufferedReader = null;
-        BufferedOutputStream bufferedOutputStream = null;
-        Socket clientSocket = null;
-
-        try {
-            ServerSocket listener = new ServerSocket(port);
-            while (listener.isBound()) {
-                clientSocket = listener.accept();
-                clientSocket.setReceiveBufferSize(8192);
-                clientSocket.setSendBufferSize(8192);
-
-                bufferedOutputStream = new BufferedOutputStream(clientSocket.getOutputStream());
-                bufferedReader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream(), "UTF-8"));
-                String readInput = bufferedReader.readLine();
-                System.out.println("Received:" + readInput);
-                if (null != readInput) {
-
-                    File fp = new File(readInput);
-                    if (fp.isFile() && fp.exists() && fp.canRead()) {
-                        File[] listFiles = fp.listFiles();
-                        for (File lfp : listFiles) {
-                            copyFile(bufferedOutputStream, lfp);
-                        }
-                    } else {
-                        copyFile(bufferedOutputStream, fp);
-
-                    }
-                    if (null != bufferedOutputStream) {
-                        bufferedOutputStream.close();
-                    }
-                    if (null != bufferedReader) {
-                        bufferedReader.close();
-                    }
-                    if (!clientSocket.isClosed()) {
-                        clientSocket.close();
-                    }
-                }
-            }
-        } finally {
-            if (null != bufferedOutputStream) {
-                bufferedOutputStream.close();
-            }
-            if (null != bufferedReader) {
-                bufferedReader.close();
-            }
-            clientSocket.close();
-
-        }
-    }
-
-    private static void copyFile(BufferedOutputStream bufferedOutputStream, File fp) {
-        int length = 8192;
-        byte[] b = new byte[length];
-        try {
-            if (!fp.canRead()) {
-                System.out.println("Cannot Read:" + fp.getAbsolutePath());
-            }
-            BufferedInputStream bufferedInputStream = new BufferedInputStream(new FileInputStream(fp));
-            for (int read = bufferedInputStream.read(b); read >= 0; read = bufferedInputStream.read(b)) {
-                bufferedOutputStream.write(b, 0, read);
-            }
-            bufferedOutputStream.flush();
-        } catch (IOException ex) {
-            Logger.getLogger(CopyServer.class.getName()).log(Level.SEVERE, null, ex);
-        }
+        new CopyServer(Paths.get(args[1])).serve(Integer.parseInt(args[0]));
     }
 }
